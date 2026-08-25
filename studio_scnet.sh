@@ -13,6 +13,11 @@
 #   3. 监听 0.0.0.0 与控制台登记的内网端口。scnet 用平台域名路由到内网端口
 #      （不是路径前缀代理），所以前端不需要 base/root_path 改造，改端口即可。
 #
+# ★ 默认走 studio.sh --no-venv：镜像里依赖已经装在系统 site-packages，而 DCU 上
+#   很多包没有对应架构的 wheel —— 一旦进 venv，requirements.txt 里镜像没有的包
+#   会被 pip 就地源码编译，慢且经常直接失败。这跟 x86+CUDA（到处是 wheel）不一样。
+#   要 venv 就 STUDIO_USE_VENV=1（不推荐）。
+#
 # 用法:
 #   bash studio_scnet.sh                  用默认端口 $STUDIO_PORT 启动
 #   STUDIO_PORT=6006 bash studio_scnet.sh 指定端口（要与控制台登记的一致）
@@ -27,6 +32,8 @@ REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 DTK_ENV="${DTK_ENV:-/opt/dtk/env.sh}"
 STUDIO_HOST="${STUDIO_HOST:-0.0.0.0}"
 STUDIO_PORT="${STUDIO_PORT:-6006}"
+# 默认不建 venv（见文件头说明）。STUDIO_USE_VENV=1 退回 venv 模式。
+STUDIO_USE_VENV="${STUDIO_USE_VENV:-0}"
 
 CHECK_ONLY=false
 PASSTHROUGH=()
@@ -90,7 +97,8 @@ print(f"[scnet] torch={torch.__version__} hip={hip} cuda={cuda}")
 if not hip:
     print("[scnet] ★ 这不是 HIP 构建的 torch —— 极可能是被 `pip install torch` 覆盖过。")
     print("[scnet]   修复：重建容器，或从光源重装 torch-*+das*.dtk* 轮子。")
-    print("[scnet]   之后用 ./studio.sh --system-site-packages 让 venv 看得见它。")
+    print("[scnet]   注意别在这个环境里 pip install torch —— 本脚本默认 --no-venv，")
+    print("[scnet]   用的就是系统解释器里那一个。")
     sys.exit(1)
 if not torch.cuda.is_available():
     print("[scnet] ★ HIP 构建，但看不到卡。检查 rocm-smi / hy-smi 与 HIP_VISIBLE_DEVICES。")
@@ -107,5 +115,27 @@ fi
 say "启动 Studio：http://$STUDIO_HOST:$STUDIO_PORT"
 say "  端口必须与 scnet 控制台登记的内网端口一致，否则平台域名路由不过来。"
 cd "$REPO_DIR" || die "cd $REPO_DIR 失败"
-exec bash studio.sh --system-site-packages \
-    --host "$STUDIO_HOST" --port "$STUDIO_PORT" "${PASSTHROUGH[@]:-}"
+# 前端：studio/web/dist 不随仓库分发，`studio run` 会用 npm 现场构建。
+# DCU 镜像里通常没有 Node —— 若已经有预构建的 dist 就直接用，别让它去找 npm。
+_BUILD_ARGS=()
+if [ -f studio/web/dist/index.html ]; then
+    if ! command -v npm >/dev/null 2>&1; then
+        say "已有预构建前端且本机没有 npm → 加 --no-build 直接用现成的 dist"
+        _BUILD_ARGS+=(--no-build)
+    fi
+else
+    if ! command -v npm >/dev/null 2>&1; then
+        say "WARNING: 没有 studio/web/dist，本机也没有 npm —— 前端起不来。"
+        say "         要么装 Node 18+，要么把别处构建好的 dist/ 拷进 studio/web/。"
+    fi
+fi
+
+if [ "$STUDIO_USE_VENV" = "1" ]; then
+    say "STUDIO_USE_VENV=1：走 venv 模式（--system-site-packages）"
+    exec bash studio.sh --system-site-packages \
+        --host "$STUDIO_HOST" --port "$STUDIO_PORT" \
+        ${_BUILD_ARGS[@]+"${_BUILD_ARGS[@]}"} ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
+fi
+exec bash studio.sh --no-venv \
+    --host "$STUDIO_HOST" --port "$STUDIO_PORT" \
+    ${_BUILD_ARGS[@]+"${_BUILD_ARGS[@]}"} ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}

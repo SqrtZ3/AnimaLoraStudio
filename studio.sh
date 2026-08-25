@@ -72,12 +72,16 @@ _USE_MIRROR=0
 _REINSTALL=0
 _TORCH_TAG=""
 _SYSTEM_SITE=0
+_NO_VENV="${STUDIO_NO_VENV:-0}"
+_INSTALL_DEPS=0
 _PASSTHROUGH=()
 for _arg in "$@"; do
     case "$_arg" in
         --mirror)    _USE_MIRROR=1 ;;
         --reinstall) _REINSTALL=1 ;;
         --system-site-packages) _SYSTEM_SITE=1 ;;
+        --no-venv)   _NO_VENV=1 ;;
+        --install-deps) _INSTALL_DEPS=1 ;;
         --torch=*)   _TORCH_TAG="${_arg#--torch=}"
                      _PASSTHROUGH+=("--torch" "$_TORCH_TAG") ;;
         *)           _PASSTHROUGH+=("$_arg") ;;
@@ -85,7 +89,13 @@ for _arg in "$@"; do
 done
 
 _TENCENT="https://mirrors.cloud.tencent.com/pypi/simple/"
-_REQ_MARKER="venv/.studio-requirements.sha256"
+if [ "$_NO_VENV" = "1" ]; then
+    _STATE_DIR=".studio-state"
+    mkdir -p "$_STATE_DIR" 2>/dev/null || true
+else
+    _STATE_DIR="venv"
+fi
+_REQ_MARKER="$_STATE_DIR/.studio-requirements.sha256"
 _TORCH_CONSTRAINTS=""
 
 # Pin the already-installed torch so pip cannot swap a vendor build (Hygon DTK
@@ -93,7 +103,7 @@ _TORCH_CONSTRAINTS=""
 # On a fresh venv with no torch the helper prints nothing and behaviour is
 # identical to before this was added.
 _pin_torch() {
-    _TORCH_CONSTRAINTS="$("$PYTHON" tools/pin_installed_torch.py         --out venv/.torch-constraints.txt 2>/dev/null || true)"
+    _TORCH_CONSTRAINTS="$("$PYTHON" tools/pin_installed_torch.py         --out "$_STATE_DIR/.torch-constraints.txt" 2>/dev/null || true)"
 }
 
 # `pip install -r requirements.txt`, carrying the torch constraints when present.
@@ -144,7 +154,42 @@ _check_venv_python_version() {
     fi
 }
 
-if [ -x "venv/bin/python" ]; then
+if [ "$_NO_VENV" = "1" ]; then
+    # 直接用系统解释器，不建 venv。
+    #
+    # 为什么这不是"图省事"：在厂商定制栈上（海光 DTK / 昇腾 / 其它国产加速卡），
+    # 依赖是随镜像装在系统 site-packages 里的，而且很多包**没有对应架构的 wheel**。
+    # 一旦进了 venv，任何 requirements.txt 里镜像没有的包都要 pip 现装 ——
+    # 在 x86+CUDA 上这是几秒钟的事（wheel 到处都是），在这些平台上会变成
+    # 就地源码编译，慢、且经常直接失败。
+    #
+    # 所以这个模式下**默认不装任何东西**，只报告缺什么，由用户决定怎么补
+    # （通常是重建镜像，而不是在运行时 pip）。要自动补就显式加 --install-deps。
+    PYTHON="${STUDIO_PYTHON:-python3}"
+    command -v "$PYTHON" >/dev/null 2>&1 || PYTHON=python
+    command -v "$PYTHON" >/dev/null 2>&1 || {
+        echo "studio.sh: --no-venv but no python3/python on PATH" >&2; exit 1; }
+    echo "[studio] --no-venv: using system interpreter $("$PYTHON" -c 'import sys;print(sys.executable)')"
+    _check_venv_python_version
+
+    if [ -f requirements.txt ]; then
+        _MISSING="$("$PYTHON" tools/check_missing_deps.py requirements.txt 2>/dev/null || true)"
+        if [ -n "$_MISSING" ]; then
+            if [ "$_INSTALL_DEPS" = "1" ]; then
+                echo "[studio] --install-deps: installing into the system interpreter: $_MISSING"
+                _pip_install_reqs || { echo "studio.sh: pip install failed" >&2; exit 1; }
+            else
+                echo "[studio] WARNING: these requirements are not importable:" >&2
+                echo "[studio]   $_MISSING" >&2
+                echo "[studio] --no-venv does not install anything by default." >&2
+                echo "[studio] Add them to your image, or re-run with --install-deps to pip them" >&2
+                echo "[studio] into the system interpreter (may build from source on this platform)." >&2
+            fi
+        else
+            echo "[studio] all requirements are importable; nothing to install"
+        fi
+    fi
+elif [ -x "venv/bin/python" ]; then
     PYTHON="venv/bin/python"
     _check_venv_python_version
 elif [ -x ".venv/bin/python" ]; then
@@ -222,6 +267,11 @@ fi
 # (or no marker yet on an old venv), `pip install -r requirements.txt` to add
 # missing packages. NO --upgrade -- existing torch+cu128 etc stays untouched.
 _STALE="$("$PYTHON" tools/check_requirements_changed.py --marker "$_REQ_MARKER" 2>/dev/null || echo missing)"
+# --no-venv 下**永不**自动装：那是用户的系统解释器，而且这些平台上缺的包多半
+# 要源码编译。上面已经报过缺什么了，要装得显式 --install-deps。
+if [ "$_NO_VENV" = "1" ] && [ "$_INSTALL_DEPS" != "1" ]; then
+    _STALE="skip"
+fi
 if [ "$_STALE" = "stale" ]; then
     echo "[studio] requirements.txt changed since last sync; installing new deps (no upgrade)..."
     if _pip_install_reqs; then
