@@ -173,6 +173,11 @@ def capability_violations(model_family: str, values: dict) -> list[str]:
 AttentionBackend = Literal["none", "xformers", "flash_attn"]
 
 
+# 训练设备后端。auto/cuda 走原有 NVIDIA 路径（逐字节不变）；dcu 走海光 DTK
+# （HIP 后端的 torch，设备命名空间仍是 "cuda"，见 utils/dcu_compat.py）。
+DeviceBackend = Literal["auto", "cuda", "dcu"]
+
+
 # 前端 SchemaForm 按这个顺序渲染区块。
 # 每组：(key, label, default_collapsed)。default_collapsed=True 让前端初始默认折叠。
 # 模型路径 readonly 显示「自动 · 全局设置」徽章，不折叠。

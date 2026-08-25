@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from .common import (
     AttentionBackend,
+    DeviceBackend,
     FAMILY_CONFIG_DEFAULTS,
     FAMILY_SAMPLING,
     LEGACY_SAMPLING_FAMILIES,
@@ -947,6 +948,11 @@ class TrainingConfig(BaseModel):
             disable_value="xformers",
             disable_hint="NaViT 打包已强制 xformers varlen（块对角必需，需安装 xformers）",
         ),
+    )
+    device_backend: DeviceBackend = Field(
+        "auto",
+        description="训练设备后端。auto/cuda 走 NVIDIA GPU；dcu 走海光 DCU（DTK/HIP，需海光适配版 PyTorch）",
+        json_schema_extra=_meta("system", advanced=True),
     )
     num_workers: int = Field(
         0, ge=0,

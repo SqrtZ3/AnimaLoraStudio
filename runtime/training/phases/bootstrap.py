@@ -171,6 +171,18 @@ def run(ctx: TrainingContext) -> None:
 
     _resolve_sample_seed(args)
 
+    # 设备后端（默认 auto → 原有 NVIDIA 路径，逐字节不变）。
+    # dcu：海光 DTK 的 torch 是 HIP 后端，设备命名空间仍是 "cuda"，所以这里
+    # 只做「确认 + 可用性修复 + 不支持项 fail-fast」，不做设备重映射。
+    # 必须在第一次真正使用设备之前 —— 见 dcu_compat.enable() 的顺序说明。
+    from utils import dcu_compat
+
+    if dcu_compat.dcu_requested(getattr(args, "device_backend", "auto")):
+        dcu_compat.enable()
+        dcu_compat.capability_report()
+        dcu_compat.guard_unsupported(args)
+        logger.info("[dcu] %s", dcu_compat.miopen_cache_hint())
+
     ctx.device = "cuda" if torch.cuda.is_available() else "cpu"
     if args.mixed_precision == "bf16":
         ctx.dtype = torch.bfloat16

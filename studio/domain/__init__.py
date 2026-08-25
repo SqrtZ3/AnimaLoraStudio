@@ -12,7 +12,7 @@
 注意：不使用 `from __future__ import annotations`——Pydantic v2 + Python 3.12+
 在延迟求值模式下会将 typing._SpecialForm 当成 schema key，触发 AttributeError。
 """
-from .common import AttentionBackend, GROUP_ORDER, _meta
+from .common import AttentionBackend, DeviceBackend, GROUP_ORDER, _meta
 from .comfy_parity import (
     force_comfy_parity_runtime_config,
     is_exact_ksampler_parity_backend,
@@ -26,6 +26,7 @@ from .xy_matrix import XYAxisSpec, XYAxisType, XYMatrixSpec, _check_axis_values
 
 __all__ = [
     "AttentionBackend",
+    "DeviceBackend",
     "GROUP_ORDER",
     "GenerateConfig",
     "LoraEntry",
