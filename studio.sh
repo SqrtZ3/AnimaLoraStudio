@@ -71,11 +71,13 @@ export PYTHONIOENCODING=utf-8
 _USE_MIRROR=0
 _REINSTALL=0
 _TORCH_TAG=""
+_SYSTEM_SITE=0
 _PASSTHROUGH=()
 for _arg in "$@"; do
     case "$_arg" in
         --mirror)    _USE_MIRROR=1 ;;
         --reinstall) _REINSTALL=1 ;;
+        --system-site-packages) _SYSTEM_SITE=1 ;;
         --torch=*)   _TORCH_TAG="${_arg#--torch=}"
                      _PASSTHROUGH+=("--torch" "$_TORCH_TAG") ;;
         *)           _PASSTHROUGH+=("$_arg") ;;
@@ -84,6 +86,25 @@ done
 
 _TENCENT="https://mirrors.cloud.tencent.com/pypi/simple/"
 _REQ_MARKER="venv/.studio-requirements.sha256"
+_TORCH_CONSTRAINTS=""
+
+# Pin the already-installed torch so pip cannot swap a vendor build (Hygon DTK
+# "+das", ROCm "+rocm", self-compiled "+local") for the same-named PyPI wheel.
+# On a fresh venv with no torch the helper prints nothing and behaviour is
+# identical to before this was added.
+_pin_torch() {
+    _TORCH_CONSTRAINTS="$("$PYTHON" tools/pin_installed_torch.py         --out venv/.torch-constraints.txt 2>/dev/null || true)"
+}
+
+# `pip install -r requirements.txt`, carrying the torch constraints when present.
+_pip_install_reqs() {
+    _pin_torch
+    if [ -n "$_TORCH_CONSTRAINTS" ]; then
+        _pip_install -r requirements.txt -c "$_TORCH_CONSTRAINTS"
+    else
+        _pip_install -r requirements.txt
+    fi
+}
 
 _pip_install() {
     # Usage: _pip_install [pip args...]
@@ -146,8 +167,18 @@ else
         echo "studio.sh: no Python 3.10+ found on PATH (need one of python3.10/3.11/3.12/3.13)" >&2
         exit 1
     fi
-    echo "[studio] No venv found. Creating venv/ via $BOOTSTRAP_PY ..."
-    "$BOOTSTRAP_PY" -m venv venv || { echo "studio.sh: failed to create venv" >&2; exit 1; }
+    if [ "$_SYSTEM_SITE" = "1" ]; then
+        # Vendor torch builds (Hygon DTK / ROCm / self-compiled) live in the
+        # system interpreter. A plain venv hides them, so requirements.txt's
+        # `torch>=2.0.0` reads as unsatisfied and pip installs a same-named CPU
+        # wheel from PyPI -- exiting 0 while breaking the whole environment.
+        # --system-site-packages lets the venv inherit them instead.
+        echo "[studio] No venv found. Creating venv/ via $BOOTSTRAP_PY (--system-site-packages) ..."
+        "$BOOTSTRAP_PY" -m venv --system-site-packages venv             || { echo "studio.sh: failed to create venv" >&2; exit 1; }
+    else
+        echo "[studio] No venv found. Creating venv/ via $BOOTSTRAP_PY ..."
+        "$BOOTSTRAP_PY" -m venv venv || { echo "studio.sh: failed to create venv" >&2; exit 1; }
+    fi
     PYTHON="venv/bin/python"
 
     _pip_install --upgrade pip || { echo "studio.sh: failed to upgrade pip" >&2; exit 1; }
@@ -163,6 +194,9 @@ else
         if ! _pip_install torch torchvision --index-url "$_TORCH_INDEX"; then
             echo "[studio] setup: forced torch install failed; will fall back to PyPI default in requirements.txt"
         fi
+    elif "$PYTHON" -c "import torch" >/dev/null 2>&1; then
+        # Inherited / already-present torch (this is the vendor-build path).
+        echo "[studio] setup: torch already present, leaving it untouched"
     else
         _TORCH_INDEX="$("$PYTHON" tools/select_torch_index.py 2>/dev/null || true)"
         if [ -n "$_TORCH_INDEX" ]; then
@@ -176,7 +210,7 @@ else
 
     if [ -f requirements.txt ]; then
         echo "[studio] Installing Python dependencies..."
-        _pip_install -r requirements.txt || { echo "studio.sh: pip install failed" >&2; exit 1; }
+        _pip_install_reqs || { echo "studio.sh: pip install failed" >&2; exit 1; }
     else
         echo "studio.sh: requirements.txt not found, skipping dependency install" >&2
     fi
@@ -190,7 +224,7 @@ fi
 _STALE="$("$PYTHON" tools/check_requirements_changed.py --marker "$_REQ_MARKER" 2>/dev/null || echo missing)"
 if [ "$_STALE" = "stale" ]; then
     echo "[studio] requirements.txt changed since last sync; installing new deps (no upgrade)..."
-    if _pip_install -r requirements.txt; then
+    if _pip_install_reqs; then
         "$PYTHON" tools/check_requirements_changed.py --marker "$_REQ_MARKER" --update-marker >/dev/null 2>&1 || true
         echo "[studio] dep sync complete"
     else

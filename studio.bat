@@ -28,11 +28,14 @@ set PYTHONIOENCODING=utf-8
 REM Parse our flags; collect remaining args to forward to Python.
 set REINSTALL=0
 set TORCH_TAG=
+set SYSTEM_SITE=0
 set PASSTHROUGH=
 :argloop
 if "%~1"=="" goto argdone
 if /i "%~1"=="--reinstall" (
     set REINSTALL=1
+) else if /i "%~1"=="--system-site-packages" (
+    set SYSTEM_SITE=1
 ) else (
     REM Check for --torch=<tag> prefix
     set _ARG=%~1
@@ -48,6 +51,7 @@ goto argloop
 :argdone
 
 set REQ_MARKER=venv\.studio-requirements.sha256
+set TORCH_CONSTRAINTS_FILE=venv\.torch-constraints.txt
 
 REM --reinstall: nuke venv before detection. studio_data\ is untouched.
 if "%REINSTALL%"=="1" (
@@ -104,7 +108,15 @@ if exist "venv\Scripts\python.exe" (
         echo [studio] If you have a newer Python installed, set PY_PYTHON=3.13 ^(or your version^) and retry. 1>&2
     )
     echo [studio] No venv detected. Creating venv\ via `!BOOTSTRAP_PY!` -- first run may take a few minutes...
-    !BOOTSTRAP_PY! -m venv venv || (echo studio.bat: failed to create venv 1>&2 & goto :fail)
+    REM Vendor torch builds (ROCm / self-compiled / Hygon DTK) live in the system
+    REM interpreter. A plain venv hides them, so requirements.txt's `torch>=2.0.0`
+    REM reads as unsatisfied and pip installs a same-named PyPI wheel over the top --
+    REM exiting 0 while breaking the environment. --system-site-packages inherits them.
+    if "!SYSTEM_SITE!"=="1" (
+        !BOOTSTRAP_PY! -m venv --system-site-packages venv || (echo studio.bat: failed to create venv 1>&2 & goto :fail)
+    ) else (
+        !BOOTSTRAP_PY! -m venv venv || (echo studio.bat: failed to create venv 1>&2 & goto :fail)
+    )
     set PYTHON=venv\Scripts\python.exe
 
     !PYTHON! -m pip install --upgrade pip -i https://mirrors.cloud.tencent.com/pypi/simple/ || (echo studio.bat: failed to upgrade pip 1>&2 & goto :fail)
@@ -122,6 +134,10 @@ if exist "venv\Scripts\python.exe" (
         )
     ) else (
         set TORCH_INDEX=
+        !PYTHON! -c "import torch" >nul 2>nul
+        if not errorlevel 1 (
+            echo [studio] setup: torch already present, leaving it untouched
+        ) else (
         for /f "delims=" %%i in ('!PYTHON! tools\select_torch_index.py 2^>nul') do set TORCH_INDEX=%%i
         if defined TORCH_INDEX (
             echo [studio] setup: NVIDIA GPU detected; installing torch from !TORCH_INDEX!
@@ -131,14 +147,16 @@ if exist "venv\Scripts\python.exe" (
                 echo [studio] setup: you can fix manually later via Studio Settings ^> PyTorch ^> Reinstall
             )
         )
+        )
     )
 
     if exist requirements.txt (
         echo [studio] Installing Python dependencies -- will retry via Tencent mirror if slow...
-        !PYTHON! -m pip install -r requirements.txt
+        call :pin_torch
+        !PYTHON! -m pip install -r requirements.txt !PIP_CONSTRAINTS!
         if errorlevel 1 (
             echo [studio] pip install failed, retrying via Tencent mirror...
-            !PYTHON! -m pip install -r requirements.txt -i https://mirrors.cloud.tencent.com/pypi/simple/ || (echo studio.bat: pip install failed 1>&2 & goto :fail)
+            !PYTHON! -m pip install -r requirements.txt !PIP_CONSTRAINTS! -i https://mirrors.cloud.tencent.com/pypi/simple/ || (echo studio.bat: pip install failed 1>&2 & goto :fail)
         )
     ) else (
         echo studio.bat: requirements.txt not found, skipping dependency install 1>&2
@@ -153,7 +171,8 @@ set STALE=
 for /f "delims=" %%i in ('!PYTHON! tools\check_requirements_changed.py --marker %REQ_MARKER% 2^>nul') do set STALE=%%i
 if "!STALE!"=="stale" (
     echo [studio] requirements.txt changed since last sync; installing new deps ^(no upgrade^)...
-    !PYTHON! -m pip install -r requirements.txt
+    call :pin_torch
+    !PYTHON! -m pip install -r requirements.txt !PIP_CONSTRAINTS!
     if errorlevel 1 (
         echo [studio] WARNING: dep sync failed; existing venv still works but may miss new deps 1>&2
         echo [studio] try studio.bat --reinstall if errors persist 1>&2
@@ -194,6 +213,15 @@ if %STUDIO_ERR% NEQ 0 (
     pause >nul
 )
 exit /b %STUDIO_ERR%
+
+:pin_torch
+REM Pin the already-installed torch so pip cannot swap a vendor build
+REM (ROCm "+rocm", Hygon DTK "+das", self-compiled "+local") for the
+REM same-named PyPI wheel. Fresh venv with no torch -> helper prints
+REM nothing, PIP_CONSTRAINTS stays empty, behaviour unchanged.
+set PIP_CONSTRAINTS=
+for /f "delims=" %%i in ('!PYTHON! tools\pin_installed_torch.py --out %TORCH_CONSTRAINTS_FILE% --quiet 2^>nul') do set PIP_CONSTRAINTS=-c %%i
+exit /b 0
 
 :fail
 echo.
